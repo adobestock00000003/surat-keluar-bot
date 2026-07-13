@@ -1,4 +1,4 @@
-# Bot Telegram Penomoran Surat Keluar Bidang
+# Bot Telegram Penomoran Surat Keluar Bidang — v2
 
 Bot Telegram untuk menerbitkan nomor surat keluar dengan pola:
 
@@ -8,10 +8,12 @@ Contoh:
 
 `500.13.3.1/00001`
 
-## Fitur
+## Fitur utama
 
 - Pilih kode klasifikasi melalui tombol Telegram.
-- Nomor urut 5 digit otomatis.
+- Nomor urut otomatis 5 digit.
+- Tanggal surat keluar dicatat untuk setiap nomor.
+- Pilihan tanggal hari ini atau input manual `DD-MM-YYYY`.
 - Mode nomor global atau per klasifikasi.
 - Database SQLite.
 - Transaksi database untuk mencegah dua pengguna memperoleh nomor yang sama.
@@ -19,50 +21,103 @@ Contoh:
 - Pencarian register surat.
 - Pembatasan akses berdasarkan Telegram User ID.
 - Admin dapat menentukan nomor berikutnya.
-- Export register ke CSV.
+- Export seluruh register ke CSV.
+- Laporan bulanan dalam format Excel `.xlsx`.
+- Laporan Excel terdiri dari:
+  - `Register Surat`
+  - `Rekap Klasifikasi`
+  - grafik jumlah surat per klasifikasi
+- Migrasi otomatis database versi lama.
 - Cocok dipasang di Railway dengan persistent volume.
 
-## Struktur nomor
+## Alur pembuatan nomor
 
-Default:
+1. Pilih klasifikasi.
+2. Pilih tanggal surat:
+   - Hari ini
+   - Masukkan tanggal lain
+3. Isi perihal.
+4. Isi tujuan/penerima.
+5. Konfirmasi.
+6. Nomor 5 digit diterbitkan dan disimpan.
 
-`500.13.3.1/00001`
+## Laporan bulanan
 
-Urutan berikutnya:
+Melalui tombol:
 
-`500.13.3.2/00002`
+`📊 Laporan Bulanan`
 
-Karena default `SEQUENCE_MODE=global`, nomor 5 digit berjalan terus untuk seluruh surat keluar bidang, meskipun klasifikasinya berbeda.
+Bot menampilkan pilihan 6 bulan terakhir.
 
-Jika ingin setiap klasifikasi punya urutan sendiri:
+Atau gunakan perintah:
 
-`SEQUENCE_MODE=per_classification`
-
-## Menjalankan secara lokal
-
-1. Install Python 3.12 atau versi Python modern yang kompatibel.
-2. Buat virtual environment.
-3. Install dependency:
-
-```bash
-pip install -r requirements.txt
+```text
+/laporan
 ```
 
-4. Salin `.env.example` menjadi konfigurasi environment Anda.
-5. Set minimal:
+Untuk bulan berjalan.
+
+Bulan tertentu:
+
+```text
+/laporan 2026-07
+```
+
+Spreadsheet dibuat berdasarkan **tanggal surat keluar**, bukan tanggal input ke bot.
+
+Kolom pada sheet `Register Surat`:
+
+- No.
+- Tanggal Surat
+- Nomor Surat
+- Kode Klasifikasi
+- Klasifikasi
+- Perihal
+- Tujuan
+- Dibuat Oleh
+- Waktu Input
+- Status
+
+Sheet `Rekap Klasifikasi` berisi jumlah surat per kode klasifikasi dan grafik.
+
+## Migrasi dari v1
+
+Jika Anda sebelumnya memakai v1 dan database sudah tersimpan di Railway Volume, cukup update kode.
+
+Saat v2 dijalankan pertama kali:
+
+- kolom `letter_date` ditambahkan otomatis;
+- data lama diisi tanggal berdasarkan tanggal input sebelumnya;
+- nomor yang sudah ada tetap tersimpan;
+- counter nomor tetap melanjutkan database lama.
+
+Jangan hapus Railway Volume `/data`.
+
+## Environment Variables Railway
 
 ```env
-BOT_TOKEN=token_bot_anda
-ADMIN_IDS=id_telegram_admin
+BOT_TOKEN=TOKEN_BOT_TELEGRAM
+ADMIN_IDS=123456789
+ALLOWED_USER_IDS=123456789,987654321
+DB_PATH=/data/surat_keluar.db
+SEQUENCE_MODE=global
+START_NUMBER=1
+APP_TIMEZONE=Asia/Jakarta
 ```
 
-6. Jalankan:
+## Railway Volume
 
-```bash
-python main.py
+Mount path:
+
+```text
+/data
 ```
 
-> Program membaca environment variable dari sistem/deployment platform. File `.env` tidak dibaca otomatis agar deployment tetap sederhana dan aman.
+Database:
+
+```text
+/data/surat_keluar.db
+```
 
 ## Perintah bot
 
@@ -71,6 +126,8 @@ python main.py
 - `/riwayat` — 10 nomor terakhir
 - `/terakhir` — nomor terakhir
 - `/cari kata` — cari register
+- `/laporan` — laporan Excel bulan berjalan
+- `/laporan 2026-07` — laporan Excel bulan tertentu
 - `/klasifikasi` — daftar klasifikasi
 - `/id` — lihat Telegram ID
 - `/batal` — batalkan proses
@@ -78,58 +135,25 @@ python main.py
 Admin:
 
 - `/setnomor 123` — nomor berikutnya menjadi `00123`
-- `/export` — export register ke CSV
+- `/export` — export seluruh register ke CSV
 
-## Deploy ke Railway
+## Deploy/update ke Railway
 
-### 1. Upload project ke GitHub
+Jika bot v1 sudah berjalan:
 
-Upload seluruh file project ini ke satu repository.
-
-### 2. Buat service Railway dari GitHub
-
-Railway akan menjalankan project menggunakan `Dockerfile`.
-
-### 3. Tambahkan Variables
+1. Ganti/update file repository GitHub dengan versi v2.
+2. Pastikan Railway Volume tetap terpasang di `/data`.
+3. Tambahkan variable:
 
 ```env
-BOT_TOKEN=...
-ADMIN_IDS=...
-ALLOWED_USER_IDS=...
-DB_PATH=/data/surat_keluar.db
-SEQUENCE_MODE=global
-START_NUMBER=1
+APP_TIMEZONE=Asia/Jakarta
 ```
 
-### 4. Pasang Volume
+4. Railway akan redeploy.
+5. Cek log sampai muncul:
 
-Mount persistent volume ke:
+```text
+Bot started. DB=/data/surat_keluar.db | SEQUENCE_MODE=global | TIMEZONE=Asia/Jakarta
+```
 
-`/data`
-
-Dengan begitu database tetap tersimpan ketika aplikasi redeploy/restart.
-
-## Penting tentang nomor surat
-
-Bot tidak menghapus atau memakai ulang nomor yang sudah diterbitkan. Ini sengaja dibuat agar register tetap konsisten.
-
-Jika ingin melanjutkan nomor manual yang sudah berjalan, misalnya nomor terakhir sebelumnya `00122`, gunakan:
-
-`/setnomor 123`
-
-Maka nomor berikutnya yang diterbitkan menjadi `00123`.
-
-## Klasifikasi
-
-Data kode klasifikasi sudah dimasukkan sesuai tabel pada foto yang diberikan, mulai dari `500.13` sampai `500.13.6.4`.
-
-## Pengembangan lanjutan yang mudah ditambahkan
-
-- Format nomor lengkap dengan kode perangkat daerah/tahun.
-- Reset nomor otomatis setiap awal tahun.
-- Persetujuan admin sebelum nomor diterbitkan.
-- Edit metadata register tanpa mengubah nomor.
-- Status BATAL/VOID untuk surat yang batal digunakan.
-- Export PDF atau Excel.
-- Dashboard web.
-- Integrasi dengan bot Surat Tugas yang sudah ada.
+Data lama tidak perlu dihapus.
