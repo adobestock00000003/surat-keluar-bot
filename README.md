@@ -1,4 +1,4 @@
-# Bot Telegram Penomoran Surat Keluar Bidang — v2
+# Bot Telegram Penomoran Surat Keluar Bidang — v3
 
 Bot Telegram untuk menerbitkan nomor surat keluar dengan pola:
 
@@ -93,6 +93,32 @@ Saat v2 dijalankan pertama kali:
 
 Jangan hapus Railway Volume `/data`.
 
+
+## Reset nomor setelah testing
+
+Admin dapat mengembalikan bot ke kondisi awal dengan:
+
+```text
+/resetnomor
+```
+
+Bot akan menampilkan konfirmasi sebelum melakukan reset.
+
+Saat dikonfirmasi, sistem akan:
+
+- menghapus seluruh register surat percobaan;
+- menghapus seluruh counter nomor;
+- membuat nomor berikutnya kembali mulai dari `START_NUMBER`;
+- default `START_NUMBER=1`, sehingga nomor berikutnya menjadi `00001`.
+
+Reset ini sengaja ikut menghapus data uji. Hanya mereset counter tanpa menghapus register lama dapat menimbulkan benturan nomor ketika nomor yang sama diterbitkan kembali.
+
+Perintah ini hanya dapat dijalankan oleh Telegram ID yang terdaftar di:
+
+```env
+ADMIN_IDS=123456789
+```
+
 ## Environment Variables Railway
 
 ```env
@@ -135,6 +161,7 @@ Database:
 Admin:
 
 - `/setnomor 123` — nomor berikutnya menjadi `00123`
+- `/resetnomor` — hapus data uji dan mulai kembali dari nomor awal
 - `/export` — export seluruh register ke CSV
 
 ## Deploy/update ke Railway

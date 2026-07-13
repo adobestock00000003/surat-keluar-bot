@@ -462,6 +462,43 @@ def set_next_global_number(next_number: int, user_id: int, user_name: str) -> No
         conn.commit()
 
 
+def reset_all_test_data(user_id: int, user_name: str) -> None:
+    """
+    Menghapus seluruh register surat dan counter nomor, lalu mengembalikan
+    nomor berikutnya ke START_NUMBER. Digunakan hanya oleh admin setelah
+    konfirmasi eksplisit.
+    """
+    conn = db_connect()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+
+        # Hapus seluruh register uji dan seluruh counter.
+        conn.execute("DELETE FROM letters")
+        conn.execute("DELETE FROM counters")
+
+        # Reset ID internal register agar database benar-benar bersih.
+        conn.execute("DELETE FROM sqlite_sequence WHERE name = 'letters'")
+
+        # Simpan jejak reset pada audit log.
+        conn.execute("""
+            INSERT INTO audit_log(action, detail, user_id, user_name, created_at)
+            VALUES (?, ?, ?, ?, ?)
+        """, (
+            "RESET_ALL_TEST_DATA",
+            f"Register dihapus dan nomor dikembalikan ke START_NUMBER={START_NUMBER}",
+            user_id,
+            user_name,
+            now_iso(),
+        ))
+
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
 def export_csv_file() -> str:
     fd, path = tempfile.mkstemp(prefix="surat_keluar_", suffix=".csv")
     os.close(fd)
@@ -849,6 +886,19 @@ def confirm_keyboard() -> InlineKeyboardMarkup:
     ])
 
 
+def reset_number_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(
+            "🗑 YA, HAPUS DATA UJI & RESET",
+            callback_data="reset:confirm",
+        )],
+        [InlineKeyboardButton(
+            "❌ Batalkan",
+            callback_data="reset:cancel",
+        )],
+    ])
+
+
 def report_month_keyboard() -> InlineKeyboardMarkup:
     current = current_month_key()
     months = [shift_month(current, -i) for i in range(6)]
@@ -909,6 +959,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "• /batal — batalkan proses input\n\n"
         "<b>Admin:</b>\n"
         "• /setnomor 123 — set nomor berikutnya menjadi 00123\n"
+        "• /resetnomor — hapus data uji dan mulai lagi dari nomor awal\n"
         "• /export — ekspor seluruh register ke CSV"
     )
     await update.effective_message.reply_text(text, parse_mode=ParseMode.HTML)
@@ -1485,6 +1536,76 @@ async def set_number_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     )
 
 
+async def reset_number_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await access_allowed(update):
+        return
+    if not is_admin(update):
+        await update.effective_message.reply_text("⛔ Perintah ini hanya untuk admin.")
+        return
+
+    await update.effective_message.reply_text(
+        "⚠️ <b>RESET NOMOR & DATA UJI</b>\n\n"
+        f"Tindakan ini akan:\n"
+        "• menghapus <b>seluruh register surat</b> yang sudah dibuat;\n"
+        "• menghapus seluruh counter nomor;\n"
+        f"• membuat nomor berikutnya kembali mulai dari <code>{START_NUMBER:05d}</code>.\n\n"
+        "<b>Tindakan ini tidak dapat dibatalkan.</b>\n"
+        "Gunakan hanya jika data yang ada memang masih data percobaan.",
+        parse_mode=ParseMode.HTML,
+        reply_markup=reset_number_keyboard(),
+    )
+
+
+async def reset_number_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await access_allowed(update):
+        return
+
+    query = update.callback_query
+    await query.answer()
+
+    if not is_admin(update):
+        await query.edit_message_text("⛔ Perintah ini hanya untuk admin.")
+        return
+
+    action = query.data
+
+    if action == "reset:cancel":
+        await query.edit_message_text(
+            "✅ Reset dibatalkan. Data dan nomor tidak berubah.",
+            reply_markup=main_menu(),
+        )
+        return
+
+    if action != "reset:confirm":
+        return
+
+    user = update.effective_user
+
+    try:
+        await asyncio.to_thread(
+            reset_all_test_data,
+            user.id,
+            user_display_name(update),
+        )
+    except Exception as exc:
+        logger.exception("Failed to reset test data")
+        await query.edit_message_text(
+            f"⚠️ Reset gagal: {esc(str(exc))}",
+            parse_mode=ParseMode.HTML,
+            reply_markup=main_menu(),
+        )
+        return
+
+    await query.edit_message_text(
+        "✅ <b>RESET BERHASIL</b>\n\n"
+        "Seluruh register surat percobaan telah dihapus.\n"
+        f"Nomor surat berikutnya akan dimulai kembali dari <code>{START_NUMBER:05d}</code>.\n\n"
+        "Bot sekarang siap digunakan untuk penomoran resmi.",
+        parse_mode=ParseMode.HTML,
+        reply_markup=main_menu(),
+    )
+
+
 async def export_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await access_allowed(update):
         return
@@ -1522,6 +1643,7 @@ async def post_init(application: Application) -> None:
         BotCommand("cari", "Cari register surat"),
         BotCommand("laporan", "Download laporan bulanan Excel"),
         BotCommand("klasifikasi", "Lihat daftar klasifikasi"),
+        BotCommand("resetnomor", "Admin: reset data uji dan nomor awal"),
         BotCommand("id", "Lihat Telegram ID"),
         BotCommand("help", "Panduan penggunaan"),
         BotCommand("batal", "Batalkan proses input"),
@@ -1575,6 +1697,7 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("laporan", report_command))
     app.add_handler(CommandHandler("klasifikasi", classes_command))
     app.add_handler(CommandHandler("setnomor", set_number_command))
+    app.add_handler(CommandHandler("resetnomor", reset_number_command))
     app.add_handler(CommandHandler("export", export_command))
     app.add_handler(CommandHandler("batal", cancel))
 
@@ -1585,6 +1708,7 @@ def build_application() -> Application:
     app.add_handler(CallbackQueryHandler(menu_callback, pattern=r"^menu:"))
     app.add_handler(CallbackQueryHandler(category_callback, pattern=r"^cat:"))
     app.add_handler(CallbackQueryHandler(report_callback, pattern=r"^report:"))
+    app.add_handler(CallbackQueryHandler(reset_number_callback, pattern=r"^reset:"))
 
     # Unknown commands
     app.add_handler(MessageHandler(filters.COMMAND, unknown_command))
