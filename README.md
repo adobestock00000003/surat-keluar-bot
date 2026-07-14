@@ -1,4 +1,4 @@
-# Bot Telegram Penomoran Surat Keluar Bidang — v3
+# Bot Telegram Penomoran Surat Keluar Bidang — v4
 
 Bot Telegram untuk menerbitkan nomor surat keluar dengan pola:
 
@@ -7,6 +7,23 @@ Bot Telegram untuk menerbitkan nomor surat keluar dengan pola:
 Contoh:
 
 `500.13.3.1/00001`
+
+
+## Klasifikasi tambahan
+
+Versi v4 menambahkan klasifikasi:
+
+```text
+000.3.2 — Nota Penyampaian Rencana Pengadaan
+```
+
+Contoh nomor:
+
+```text
+000.3.2/00001
+```
+
+Nomor 5 digit tetap mengikuti sistem penomoran bot. Dengan `SEQUENCE_MODE=global`, urutan tetap melanjutkan nomor global seluruh surat.
 
 ## Fitur utama
 

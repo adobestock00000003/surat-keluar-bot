@@ -73,6 +73,8 @@ ADMIN_IDS = parse_id_list(ADMIN_IDS_RAW)
 # ============================================================
 
 CLASSIFICATIONS = {
+    "000.3.2": "Nota Penyampaian Rencana Pengadaan",
+
     "500.13": "PARIWISATA DAN EKONOMI KREATIF",
     "500.13.1": "Kebijakan di bidang Pariwisata dan Ekonomi Kreatif yang dilakukan oleh Pemerintah Daerah",
 
@@ -107,6 +109,7 @@ CLASSIFICATIONS = {
 }
 
 CATEGORY_CODES = [
+    "000.3.2",
     "500.13",
     "500.13.1",
     "500.13.2",
