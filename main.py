@@ -73,6 +73,7 @@ ADMIN_IDS = parse_id_list(ADMIN_IDS_RAW)
 # ============================================================
 
 CLASSIFICATIONS = {
+    "000.1.2.3": "Perjalanan Dinas Pegawai",
     "000.3.2": "Nota Penyampaian Rencana Pengadaan",
 
     "500.13": "PARIWISATA DAN EKONOMI KREATIF",
@@ -109,6 +110,7 @@ CLASSIFICATIONS = {
 }
 
 CATEGORY_CODES = [
+    "000.1.2.3",
     "000.3.2",
     "500.13",
     "500.13.1",
