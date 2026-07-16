@@ -6,6 +6,7 @@ import os
 import re
 import sqlite3
 import tempfile
+import shutil
 from collections import Counter
 from datetime import date, datetime
 from pathlib import Path
@@ -16,6 +17,7 @@ from openpyxl import Workbook
 from openpyxl.chart import BarChart, Reference
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.worksheet.table import Table, TableStyleInfo
+from nota_konsep import clean_recipients, final_note, generate_nota_files
 from telegram import (
     BotCommand,
     InlineKeyboardButton,
@@ -44,6 +46,7 @@ ADMIN_IDS_RAW = os.getenv("ADMIN_IDS", "").strip()
 SEQUENCE_MODE = os.getenv("SEQUENCE_MODE", "global").strip().lower()
 START_NUMBER = int(os.getenv("START_NUMBER", "1"))
 APP_TIMEZONE = os.getenv("APP_TIMEZONE", "Asia/Jakarta").strip()
+LETTER_UNIT_CODE = "118.4"
 
 if SEQUENCE_MODE not in {"global", "per_classification"}:
     raise ValueError("SEQUENCE_MODE harus 'global' atau 'per_classification'.")
@@ -122,7 +125,7 @@ CATEGORY_CODES = [
 ]
 
 # Conversation states
-WAIT_LETTER_DATE, WAIT_SUBJECT, WAIT_DESTINATION, CONFIRM = range(4)
+WAIT_LETTER_DATE, WAIT_SUBJECT, WAIT_DESTINATION, CONFIRM, WAIT_NOTA_RECIPIENTS, WAIT_NOTA_TOPIC, WAIT_NOTA_NOTE, WAIT_NOTA_ATTACHMENT, CONFIRM_NOTA = range(9)
 
 logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
@@ -279,6 +282,29 @@ def init_db() -> None:
         conn.commit()
 
 
+
+def build_letter_number(
+    classification_code: str,
+    sequence_number: int,
+    letter_date: str,
+) -> str:
+    """
+    Format nomor surat:
+    KLASIFIKASI/NOMOR_URUT/118.4/TAHUN
+
+    Nomor urut maksimal tiga digit dan tidak memakai nol di depan.
+    Contoh: 500.13.3.4/123/118.4/2026
+    """
+    if not 1 <= sequence_number <= 999:
+        raise ValueError("Nomor urut harus antara 1 dan 999.")
+    try:
+        year = datetime.strptime(letter_date, "%Y-%m-%d").year
+    except ValueError as exc:
+        raise ValueError("Tanggal surat tidak valid.") from exc
+
+    return f"{classification_code}/{sequence_number}/{LETTER_UNIT_CODE}/{year}"
+
+
 def get_counter_scope(classification_code: str) -> str:
     if SEQUENCE_MODE == "per_classification":
         return classification_code
@@ -292,7 +318,7 @@ def allocate_letter_number(
     destination: str,
     user_id: int,
     user_name: str,
-) -> tuple[int, str]:
+) -> tuple[int, int, str]:
     """
     Alokasi nomor dilakukan dalam transaksi BEGIN IMMEDIATE agar dua pengguna
     tidak memperoleh nomor urut yang sama pada saat bersamaan.
@@ -320,13 +346,17 @@ def allocate_letter_number(
                 (next_number, scope),
             )
 
-        if next_number > 99999:
-            raise ValueError("Nomor urut sudah melebihi batas 5 digit (99999).")
+        if next_number > 999:
+            raise ValueError("Nomor urut sudah melebihi batas 3 digit (999).")
 
-        letter_number = f"{classification_code}/{next_number:05d}"
+        letter_number = build_letter_number(
+            classification_code,
+            next_number,
+            letter_date,
+        )
         classification_name = CLASSIFICATIONS[classification_code]
 
-        conn.execute("""
+        cursor = conn.execute("""
             INSERT INTO letters (
                 sequence_number,
                 counter_scope,
@@ -353,6 +383,7 @@ def allocate_letter_number(
             user_name,
             now_iso(),
         ))
+        letter_id = int(cursor.lastrowid)
 
         conn.execute("""
             INSERT INTO audit_log(action, detail, user_id, user_name, created_at)
@@ -366,12 +397,20 @@ def allocate_letter_number(
         ))
 
         conn.commit()
-        return next_number, letter_number
+        return letter_id, next_number, letter_number
     except Exception:
         conn.rollback()
         raise
     finally:
         conn.close()
+
+
+def get_letter_by_id(letter_id: int) -> Optional[sqlite3.Row]:
+    with db_connect() as conn:
+        return conn.execute(
+            "SELECT * FROM letters WHERE id = ?",
+            (letter_id,),
+        ).fetchone()
 
 
 def get_last_letters(limit: int = 10) -> list[sqlite3.Row]:
@@ -438,13 +477,13 @@ def get_max_sequence_global() -> int:
 def set_next_global_number(next_number: int, user_id: int, user_name: str) -> None:
     if SEQUENCE_MODE != "global":
         raise ValueError("Perintah ini hanya tersedia saat SEQUENCE_MODE=global.")
-    if not 1 <= next_number <= 99999:
-        raise ValueError("Nomor berikutnya harus antara 1 dan 99999.")
+    if not 1 <= next_number <= 999:
+        raise ValueError("Nomor berikutnya harus antara 1 dan 999.")
 
     max_used = get_max_sequence_global()
     if next_number <= max_used:
         raise ValueError(
-            f"Nomor berikutnya harus lebih besar dari nomor yang sudah pernah dipakai ({max_used:05d})."
+            f"Nomor berikutnya harus lebih besar dari nomor yang sudah pernah dipakai ({max_used})."
         )
 
     current_number = next_number - 1
@@ -459,7 +498,7 @@ def set_next_global_number(next_number: int, user_id: int, user_name: str) -> No
             VALUES (?, ?, ?, ?, ?)
         """, (
             "SET_NEXT_NUMBER",
-            f"Next global number = {next_number:05d}",
+            f"Next global number = {next_number}",
             user_id,
             user_name,
             now_iso(),
@@ -891,6 +930,44 @@ def confirm_keyboard() -> InlineKeyboardMarkup:
     ])
 
 
+def nota_offer_keyboard(letter_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(
+            "📄 Buat Nota Konsep Surat",
+            callback_data=f"nota:start:{letter_id}",
+        )],
+        [InlineKeyboardButton("🏠 Menu Utama", callback_data="menu:home")],
+    ])
+
+
+def nota_recipients_keyboard(has_existing_destination: bool) -> InlineKeyboardMarkup:
+    rows = []
+    if has_existing_destination:
+        rows.append([InlineKeyboardButton(
+            "📌 Gunakan tujuan surat sebelumnya",
+            callback_data="nota:recipients:existing",
+        )])
+    rows.append([InlineKeyboardButton("❌ Batalkan", callback_data="nota:cancel")])
+    return InlineKeyboardMarkup(rows)
+
+
+def nota_attachment_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("- (tanpa lampiran)", callback_data="nota:attachment:none")],
+        [InlineKeyboardButton("1 (satu) berkas", callback_data="nota:attachment:one")],
+        [InlineKeyboardButton("2 (dua) berkas", callback_data="nota:attachment:two")],
+        [InlineKeyboardButton("❌ Batalkan", callback_data="nota:cancel")],
+    ])
+
+
+def nota_confirm_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ Buat PDF & Word", callback_data="nota:generate")],
+        [InlineKeyboardButton("🔄 Isi Ulang", callback_data="nota:restart")],
+        [InlineKeyboardButton("❌ Batalkan", callback_data="nota:cancel")],
+    ])
+
+
 def reset_number_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton(
@@ -935,9 +1012,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     text = (
         "📨 <b>BOT PENOMORAN SURAT KELUAR BIDANG</b>\n\n"
         "Format nomor:\n"
-        "<code>KODE_KLASIFIKASI/00001</code>\n\n"
-        "Contoh:\n"
-        "<code>500.13.3.1/00001</code>\n\n"
+        "<code>KODE_KLASIFIKASI/NOMOR/118.4/TAHUN</code>\n\n"
+        "Contoh nomor ke-123:\n"
+        "<code>500.13.3.4/123/118.4/2026</code>\n\n"
         "Setiap register menyimpan tanggal surat, perihal, tujuan, pengguna, dan waktu input."
     )
     await update.effective_message.reply_text(
@@ -961,9 +1038,10 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "• /laporan — laporan spreadsheet bulan berjalan\n"
         "• /laporan 2026-07 — laporan spreadsheet bulan tertentu\n"
         "• /id — lihat Telegram ID\n"
+        "• Setelah nomor terbit, tekan Buat Nota Konsep Surat\n"
         "• /batal — batalkan proses input\n\n"
         "<b>Admin:</b>\n"
-        "• /setnomor 123 — set nomor berikutnya menjadi 00123\n"
+        "• /setnomor 123 — set nomor berikutnya menjadi 123\n"
         "• /resetnomor — hapus data uji dan mulai lagi dari nomor awal\n"
         "• /export — ekspor seluruh register ke CSV"
     )
@@ -1211,7 +1289,7 @@ async def show_confirmation(send_func, context: ContextTypes.DEFAULT_TYPE) -> No
         f"<b>Klasifikasi:</b>\n<code>{esc(code)}</code>\n{esc(name)}\n\n"
         f"<b>Perihal:</b>\n{esc(subject)}\n\n"
         f"<b>Tujuan:</b>\n{esc(destination)}\n\n"
-        "Nomor 5 digit akan diterbitkan saat tombol konfirmasi ditekan."
+        "Nomor urut tanpa nol di depan akan diterbitkan dengan format <code>klasifikasi/nomor/118.4/tahun</code>."
     )
     await send_func(
         text,
@@ -1257,7 +1335,7 @@ async def confirm_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     user = update.effective_user
 
     try:
-        sequence, letter_number = await asyncio.to_thread(
+        letter_id, sequence, letter_number = await asyncio.to_thread(
             allocate_letter_number,
             code,
             letter_date,
@@ -1302,6 +1380,294 @@ async def confirm_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     await query.edit_message_text(
         text,
         parse_mode=ParseMode.HTML,
+        reply_markup=nota_offer_keyboard(letter_id),
+    )
+    return ConversationHandler.END
+
+
+async def start_nota_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    if not await access_allowed(update):
+        return ConversationHandler.END
+
+    query = update.callback_query
+    await query.answer()
+
+    try:
+        letter_id = int(query.data.rsplit(":", 1)[1])
+    except (ValueError, IndexError):
+        await query.edit_message_text("⚠️ ID surat tidak valid.", reply_markup=main_menu())
+        return ConversationHandler.END
+
+    row = await asyncio.to_thread(get_letter_by_id, letter_id)
+    if row is None:
+        await query.edit_message_text(
+            "⚠️ Data surat tidak ditemukan. Mungkin register telah direset.",
+            reply_markup=main_menu(),
+        )
+        return ConversationHandler.END
+
+    context.user_data.clear()
+    context.user_data["nota_letter_id"] = letter_id
+    context.user_data["nota_letter_number"] = row["letter_number"]
+    context.user_data["nota_letter_date"] = row["letter_date"]
+    context.user_data["nota_existing_destination"] = row["destination"] or "-"
+
+    has_existing = (row["destination"] or "-").strip() != "-"
+    await query.edit_message_text(
+        "📄 <b>PEMBUATAN NOTA KONSEP SURAT</b>\n\n"
+        f"Nomor: <code>{esc(row['letter_number'])}</code>\n"
+        f"Tanggal: <b>{esc(format_date_id(row['letter_date']))}</b>\n\n"
+        "Ketik daftar <b>Kepada</b>, satu penerima per baris.\n\n"
+        "Contoh:\n"
+        "<code>Kepala Dinas Kabupaten Banyuwangi\n"
+        "Kepala Dinas Kabupaten Jember</code>\n\n"
+        "Jika jumlahnya lebih dari 2, pada nota otomatis ditulis <b>Terlampir</b>.",
+        parse_mode=ParseMode.HTML,
+        reply_markup=nota_recipients_keyboard(has_existing),
+    )
+    return WAIT_NOTA_RECIPIENTS
+
+
+async def use_existing_nota_recipients(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    if not await access_allowed(update):
+        return ConversationHandler.END
+
+    query = update.callback_query
+    await query.answer()
+    existing = context.user_data.get("nota_existing_destination", "-").strip()
+    if not existing or existing == "-":
+        await query.answer("Tujuan sebelumnya kosong.", show_alert=True)
+        return WAIT_NOTA_RECIPIENTS
+
+    recipients = clean_recipients(existing)
+    if not recipients:
+        recipients = [existing]
+    context.user_data["nota_recipients"] = recipients
+
+    await query.edit_message_text(
+        "✅ Kepada menggunakan tujuan surat sebelumnya.\n\n"
+        "Ketik bagian <b>Tentang</b>.\n"
+        "Contoh: <code>Permohonan Tanda Tangan Surat Tugas</code>",
+        parse_mode=ParseMode.HTML,
+    )
+    return WAIT_NOTA_TOPIC
+
+
+async def receive_nota_recipients(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    if not await access_allowed(update):
+        return ConversationHandler.END
+
+    raw = (update.effective_message.text or "").strip()
+    recipients = clean_recipients(raw)
+    if not recipients:
+        await update.effective_message.reply_text(
+            "⚠️ Daftar Kepada belum terbaca. Ketik minimal satu penerima."
+        )
+        return WAIT_NOTA_RECIPIENTS
+    if len(recipients) > 30:
+        await update.effective_message.reply_text(
+            "⚠️ Maksimal 30 penerima. Untuk daftar panjang, ringkas daftar lampirannya."
+        )
+        return WAIT_NOTA_RECIPIENTS
+
+    context.user_data["nota_recipients"] = recipients
+    await update.effective_message.reply_text(
+        "📝 Ketik bagian <b>Tentang</b>.\n\n"
+        "Contoh:\n<code>Permohonan Tanda Tangan Surat Tugas</code>",
+        parse_mode=ParseMode.HTML,
+    )
+    return WAIT_NOTA_TOPIC
+
+
+async def receive_nota_topic(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    if not await access_allowed(update):
+        return ConversationHandler.END
+
+    topic = (update.effective_message.text or "").strip()
+    if len(topic) < 3:
+        await update.effective_message.reply_text("⚠️ Tentang terlalu pendek.")
+        return WAIT_NOTA_TOPIC
+    if len(topic) > 220:
+        await update.effective_message.reply_text(
+            "⚠️ Tentang terlalu panjang. Maksimal 220 karakter agar format tetap satu halaman."
+        )
+        return WAIT_NOTA_TOPIC
+
+    context.user_data["nota_topic"] = topic
+    await update.effective_message.reply_text(
+        "🗒 Ketik <b>Catatan</b> berupa uraian singkat isi surat.\n\n"
+        "Kalimat <i>sebagaimana berkas terlampir</i> akan ditambahkan otomatis di bagian akhir.\n"
+        "Maksimal 650 karakter.",
+        parse_mode=ParseMode.HTML,
+    )
+    return WAIT_NOTA_NOTE
+
+
+async def receive_nota_note(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    if not await access_allowed(update):
+        return ConversationHandler.END
+
+    note = (update.effective_message.text or "").strip()
+    if len(note) < 5:
+        await update.effective_message.reply_text("⚠️ Catatan terlalu pendek.")
+        return WAIT_NOTA_NOTE
+    if len(note) > 650:
+        await update.effective_message.reply_text(
+            f"⚠️ Catatan berjumlah {len(note)} karakter. Maksimal 650 karakter agar format tetap satu halaman."
+        )
+        return WAIT_NOTA_NOTE
+
+    context.user_data["nota_note"] = note
+    await update.effective_message.reply_text(
+        "📎 Pilih jumlah <b>Lampiran</b>:",
+        parse_mode=ParseMode.HTML,
+        reply_markup=nota_attachment_keyboard(),
+    )
+    return WAIT_NOTA_ATTACHMENT
+
+
+async def select_nota_attachment(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    if not await access_allowed(update):
+        return ConversationHandler.END
+
+    query = update.callback_query
+    await query.answer()
+    mapping = {
+        "nota:attachment:none": "-",
+        "nota:attachment:one": "1 (satu) berkas",
+        "nota:attachment:two": "2 (dua) berkas",
+    }
+    attachment = mapping.get(query.data)
+    if attachment is None:
+        return WAIT_NOTA_ATTACHMENT
+    context.user_data["nota_attachment"] = attachment
+
+    recipients = context.user_data.get("nota_recipients", [])
+    shown_recipients = recipients if len(recipients) <= 2 else ["Terlampir"]
+    recipients_text = "\n".join(
+        f"{idx}. {item}" for idx, item in enumerate(shown_recipients, 1)
+    ) if len(recipients) <= 2 else "Terlampir"
+
+    await query.edit_message_text(
+        "🔎 <b>KONFIRMASI NOTA KONSEP</b>\n\n"
+        f"<b>Tanggal:</b> {esc(format_date_id(context.user_data['nota_letter_date']))}\n"
+        f"<b>Nomor:</b> <code>{esc(context.user_data['nota_letter_number'])}</code>\n\n"
+        f"<b>Kepada:</b>\n{esc(recipients_text)}\n\n"
+        f"<b>Tentang:</b>\n{esc(context.user_data['nota_topic'])}\n\n"
+        f"<b>Catatan:</b>\n{esc(final_note(context.user_data['nota_note']))}\n\n"
+        f"<b>Lampiran:</b> {esc(attachment)}",
+        parse_mode=ParseMode.HTML,
+        reply_markup=nota_confirm_keyboard(),
+    )
+    return CONFIRM_NOTA
+
+
+async def restart_nota_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    if not await access_allowed(update):
+        return ConversationHandler.END
+
+    query = update.callback_query
+    await query.answer()
+    context.user_data.pop("nota_recipients", None)
+    context.user_data.pop("nota_topic", None)
+    context.user_data.pop("nota_note", None)
+    context.user_data.pop("nota_attachment", None)
+    existing = context.user_data.get("nota_existing_destination", "-")
+    await query.edit_message_text(
+        "🔄 Silakan ketik ulang daftar <b>Kepada</b>, satu penerima per baris.\n"
+        "Jika lebih dari 2, nota otomatis menampilkan <b>Terlampir</b>.",
+        parse_mode=ParseMode.HTML,
+        reply_markup=nota_recipients_keyboard(existing.strip() != "-"),
+    )
+    return WAIT_NOTA_RECIPIENTS
+
+
+async def generate_nota_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    if not await access_allowed(update):
+        return ConversationHandler.END
+
+    query = update.callback_query
+    await query.answer("Membuat nota konsep...")
+
+    required = {
+        "nota_letter_id",
+        "nota_letter_number",
+        "nota_letter_date",
+        "nota_recipients",
+        "nota_topic",
+        "nota_note",
+        "nota_attachment",
+    }
+    if not required.issubset(context.user_data):
+        await query.edit_message_text(
+            "⚠️ Data nota tidak lengkap. Silakan mulai lagi dari nomor surat.",
+            reply_markup=main_menu(),
+        )
+        context.user_data.clear()
+        return ConversationHandler.END
+
+    await query.edit_message_text(
+        "⏳ Sedang membuat Nota Konsep Surat dalam format PDF dan Word..."
+    )
+
+    temp_dir = tempfile.mkdtemp(prefix="nota_konsep_bot_")
+    try:
+        docx_path, pdf_path = await asyncio.to_thread(
+            generate_nota_files,
+            context.user_data["nota_letter_number"],
+            context.user_data["nota_letter_date"],
+            context.user_data["nota_recipients"],
+            context.user_data["nota_topic"],
+            context.user_data["nota_note"],
+            context.user_data["nota_attachment"],
+            temp_dir,
+        )
+
+        with open(pdf_path, "rb") as pdf_file:
+            await query.message.reply_document(
+                document=pdf_file,
+                filename=Path(pdf_path).name,
+                caption=(
+                    "📄 <b>Nota Konsep Surat - PDF</b>\n"
+                    f"Nomor: <code>{esc(context.user_data['nota_letter_number'])}</code>"
+                ),
+                parse_mode=ParseMode.HTML,
+            )
+
+        with open(docx_path, "rb") as docx_file:
+            await query.message.reply_document(
+                document=docx_file,
+                filename=Path(docx_path).name,
+                caption="📝 Versi Word yang dapat diedit.",
+            )
+
+        await query.message.reply_text(
+            "✅ Nota konsep berhasil dibuat. Format utama menggunakan ukuran teks 11 dengan tata letak mengikuti contoh.",
+            reply_markup=main_menu(),
+        )
+    except Exception as exc:
+        logger.exception("Failed to generate nota konsep")
+        await query.message.reply_text(
+            f"⚠️ Nota konsep gagal dibuat: {esc(str(exc))}",
+            parse_mode=ParseMode.HTML,
+            reply_markup=nota_offer_keyboard(context.user_data["nota_letter_id"]),
+        )
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        context.user_data.clear()
+
+    return ConversationHandler.END
+
+
+async def cancel_nota_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    if not await access_allowed(update):
+        return ConversationHandler.END
+
+    query = update.callback_query
+    await query.answer()
+    context.user_data.clear()
+    await query.edit_message_text(
+        "❌ Pembuatan nota konsep dibatalkan.",
         reply_markup=main_menu(),
     )
     return ConversationHandler.END
@@ -1513,7 +1879,7 @@ async def set_number_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if len(context.args) != 1 or not context.args[0].isdigit():
         await update.effective_message.reply_text(
             "Format:\n<code>/setnomor 123</code>\n\n"
-            "Artinya nomor berikutnya yang diterbitkan adalah <code>00123</code>.",
+            "Artinya nomor berikutnya yang diterbitkan adalah <code>123</code>.",
             parse_mode=ParseMode.HTML,
         )
         return
@@ -1536,7 +1902,7 @@ async def set_number_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
 
     await update.effective_message.reply_text(
-        f"✅ Nomor berikutnya diset menjadi <code>{next_number:05d}</code>.",
+        f"✅ Nomor berikutnya diset menjadi <code>{next_number}</code>.",
         parse_mode=ParseMode.HTML,
     )
 
@@ -1553,7 +1919,7 @@ async def reset_number_command(update: Update, context: ContextTypes.DEFAULT_TYP
         f"Tindakan ini akan:\n"
         "• menghapus <b>seluruh register surat</b> yang sudah dibuat;\n"
         "• menghapus seluruh counter nomor;\n"
-        f"• membuat nomor berikutnya kembali mulai dari <code>{START_NUMBER:05d}</code>.\n\n"
+        f"• membuat nomor berikutnya kembali mulai dari <code>{START_NUMBER}</code>.\n\n"
         "<b>Tindakan ini tidak dapat dibatalkan.</b>\n"
         "Gunakan hanya jika data yang ada memang masih data percobaan.",
         parse_mode=ParseMode.HTML,
@@ -1604,7 +1970,7 @@ async def reset_number_callback(update: Update, context: ContextTypes.DEFAULT_TY
     await query.edit_message_text(
         "✅ <b>RESET BERHASIL</b>\n\n"
         "Seluruh register surat percobaan telah dihapus.\n"
-        f"Nomor surat berikutnya akan dimulai kembali dari <code>{START_NUMBER:05d}</code>.\n\n"
+        f"Nomor surat berikutnya akan dimulai kembali dari <code>{START_NUMBER}</code>.\n\n"
         "Bot sekarang siap digunakan untuk penomoran resmi.",
         parse_mode=ParseMode.HTML,
         reply_markup=main_menu(),
@@ -1665,6 +2031,7 @@ def build_application() -> Application:
     conversation = ConversationHandler(
         entry_points=[
             CallbackQueryHandler(class_callback, pattern=r"^class:"),
+            CallbackQueryHandler(start_nota_callback, pattern=r"^nota:start:\d+$"),
         ],
         states={
             WAIT_LETTER_DATE: [
@@ -1682,6 +2049,28 @@ def build_application() -> Application:
             ],
             CONFIRM: [
                 CallbackQueryHandler(confirm_callback, pattern=r"^confirm:"),
+            ],
+            WAIT_NOTA_RECIPIENTS: [
+                CallbackQueryHandler(use_existing_nota_recipients, pattern=r"^nota:recipients:existing$"),
+                CallbackQueryHandler(cancel_nota_callback, pattern=r"^nota:cancel$"),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, receive_nota_recipients),
+            ],
+            WAIT_NOTA_TOPIC: [
+                CallbackQueryHandler(cancel_nota_callback, pattern=r"^nota:cancel$"),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, receive_nota_topic),
+            ],
+            WAIT_NOTA_NOTE: [
+                CallbackQueryHandler(cancel_nota_callback, pattern=r"^nota:cancel$"),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, receive_nota_note),
+            ],
+            WAIT_NOTA_ATTACHMENT: [
+                CallbackQueryHandler(select_nota_attachment, pattern=r"^nota:attachment:"),
+                CallbackQueryHandler(cancel_nota_callback, pattern=r"^nota:cancel$"),
+            ],
+            CONFIRM_NOTA: [
+                CallbackQueryHandler(generate_nota_callback, pattern=r"^nota:generate$"),
+                CallbackQueryHandler(restart_nota_callback, pattern=r"^nota:restart$"),
+                CallbackQueryHandler(cancel_nota_callback, pattern=r"^nota:cancel$"),
             ],
         },
         fallbacks=[

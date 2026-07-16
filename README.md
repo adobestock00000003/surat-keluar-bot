@@ -1,12 +1,12 @@
-# Bot Telegram Penomoran Surat Keluar Bidang — v5
+# Bot Telegram Penomoran Surat Keluar Bidang — v7
 
 Bot Telegram untuk menerbitkan nomor surat keluar dengan pola:
 
-`KODE_KLASIFIKASI/00001`
+`KODE_KLASIFIKASI/NOMOR/118.4/TAHUN`
 
 Contoh:
 
-`500.13.3.1/00001`
+`500.13.3.4/123/118.4/2026`
 
 
 ## Klasifikasi tambahan
@@ -20,10 +20,10 @@ Versi v4 menambahkan klasifikasi:
 Contoh nomor:
 
 ```text
-000.3.2/00001
+000.3.2/123/118.4/2026
 ```
 
-Nomor 5 digit tetap mengikuti sistem penomoran bot. Dengan `SEQUENCE_MODE=global`, urutan tetap melanjutkan nomor global seluruh surat.
+Nomor urut maksimal 3 digit tetap mengikuti sistem penomoran bot. Dengan `SEQUENCE_MODE=global`, urutan tetap melanjutkan nomor global seluruh surat.
 
 
 ### Klasifikasi v5
@@ -35,14 +35,63 @@ Nomor 5 digit tetap mengikuti sistem penomoran bot. Dengan `SEQUENCE_MODE=global
 Contoh nomor:
 
 ```text
-000.1.2.3/00001
+000.1.2.3/123/118.4/2026
 ```
 
+
+
+## Nota Konsep Surat otomatis
+
+Setelah nomor surat berhasil diterbitkan, bot menampilkan tombol:
+
+```text
+📄 Buat Nota Konsep Surat
+```
+
+Bot kemudian meminta:
+
+1. **Kepada** - satu penerima per baris. Jika jumlah penerima lebih dari 2, dokumen otomatis menampilkan `Terlampir`.
+2. **Tentang** - misalnya `Permohonan Tanda Tangan Surat Tugas`.
+3. **Catatan** - uraian singkat. Bot otomatis menambahkan kalimat `sebagaimana berkas terlampir` pada bagian akhir.
+4. **Lampiran** - pilihan `-`, `1 (satu) berkas`, atau `2 (dua) berkas`.
+
+Tanggal dan nomor nota diambil otomatis dari register surat yang baru diterbitkan.
+
+Bot mengirim dua file:
+
+- PDF siap digunakan dengan tata letak mengikuti contoh;
+- DOCX versi Word yang dapat diedit, menggunakan Arial ukuran 11.
+
+Bagian kop, tujuan Kepala Dinas, asal Bidang, kalimat permohonan tanda tangan, disposisi, serta identitas Kepala Bidang dibuat tetap mengikuti template.
+
+
+## Format nomor surat v7
+
+Nomor surat sekarang menggunakan format:
+
+```text
+KODE_KLASIFIKASI/NOMOR_URUT/118.4/TAHUN
+```
+
+Contoh:
+
+```text
+500.13.3.4/123/118.4/2026
+```
+
+Ketentuannya:
+
+- nomor urut tidak memakai nol di depan;
+- `00123` ditampilkan sebagai `123`;
+- nomor urut dibatasi maksimal tiga digit, yaitu `1` sampai `999`;
+- angka `118.4` ditambahkan otomatis;
+- tahun diambil otomatis dari **tanggal surat keluar**, bukan dari tanggal input bot;
+- nomor lengkap otomatis dipakai pada Nota Konsep Surat, riwayat, pencarian, CSV, dan laporan Excel.
 
 ## Fitur utama
 
 - Pilih kode klasifikasi melalui tombol Telegram.
-- Nomor urut otomatis 5 digit.
+- Nomor urut otomatis maksimal 3 digit tanpa nol di depan.
 - Tanggal surat keluar dicatat untuk setiap nomor.
 - Pilihan tanggal hari ini atau input manual `DD-MM-YYYY`.
 - Mode nomor global atau per klasifikasi.
@@ -70,7 +119,7 @@ Contoh nomor:
 3. Isi perihal.
 4. Isi tujuan/penerima.
 5. Konfirmasi.
-6. Nomor 5 digit diterbitkan dan disimpan.
+6. Nomor urut maksimal 3 digit diterbitkan dan disimpan.
 
 ## Laporan bulanan
 
@@ -140,7 +189,7 @@ Saat dikonfirmasi, sistem akan:
 - menghapus seluruh register surat percobaan;
 - menghapus seluruh counter nomor;
 - membuat nomor berikutnya kembali mulai dari `START_NUMBER`;
-- default `START_NUMBER=1`, sehingga nomor berikutnya menjadi `00001`.
+- default `START_NUMBER=1`, sehingga nomor urut berikutnya menjadi `1`.
 
 Reset ini sengaja ikut menghapus data uji. Hanya mereset counter tanpa menghapus register lama dapat menimbulkan benturan nomor ketika nomor yang sama diterbitkan kembali.
 
@@ -191,7 +240,7 @@ Database:
 
 Admin:
 
-- `/setnomor 123` — nomor berikutnya menjadi `00123`
+- `/setnomor 123` — nomor urut berikutnya menjadi `123`
 - `/resetnomor` — hapus data uji dan mulai kembali dari nomor awal
 - `/export` — export seluruh register ke CSV
 
