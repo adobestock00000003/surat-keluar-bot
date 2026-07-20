@@ -1,4 +1,4 @@
-# Bot Telegram Penomoran Surat Keluar Bidang — v8
+# Bot Telegram Penomoran Surat Keluar Bidang — v9
 
 Bot Telegram untuk menerbitkan nomor surat keluar dengan pola:
 
@@ -197,6 +197,46 @@ Saat v2 dijalankan pertama kali:
 Jangan hapus Railway Volume `/data`.
 
 
+
+## Hapus nomor yang salah — khusus admin
+
+Admin dapat membuka menu:
+
+```text
+🗑 Hapus Nomor (Admin)
+```
+
+atau menjalankan:
+
+```text
+/hapusnomor
+```
+
+Untuk mencari nomor tertentu:
+
+```text
+/hapusnomor 123
+```
+
+Admin memilih nomor, memeriksa detail, lalu menekan konfirmasi hapus.
+
+Sistem penghapusan dibuat aman:
+
+- nomor dihapus dari register aktif;
+- nomor tidak lagi muncul pada riwayat aktif, CSV, dan laporan bulanan;
+- salinan lengkap tetap disimpan pada tabel arsip penghapusan;
+- tindakan admin dicatat pada audit log;
+- jika yang dihapus adalah nomor urut terakhir, counter otomatis mundur agar nomor itu dapat diterbitkan ulang;
+- jika yang dihapus adalah nomor lama, counter tidak berubah dan nomor lain tidak digeser.
+
+Riwayat penghapusan dapat dilihat dengan:
+
+```text
+/riwayathapus
+```
+
+Perintah dan tombol penghapusan hanya bekerja untuk Telegram ID pada `ADMIN_IDS`.
+
 ## Reset nomor setelah testing
 
 Admin dapat mengembalikan bot ke kondisi awal dengan:
@@ -264,6 +304,8 @@ Database:
 Admin:
 
 - `/setnomor 123` — nomor urut berikutnya menjadi `123`
+- `/hapusnomor` — pilih dan hapus nomor yang salah
+- `/riwayathapus` — lihat arsip nomor yang pernah dihapus
 - `/resetnomor` — hapus data uji dan mulai kembali dari nomor awal
 - `/export` — export seluruh register ke CSV
 

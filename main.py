@@ -288,6 +288,35 @@ def init_db() -> None:
             CREATE INDEX IF NOT EXISTS idx_letters_letter_date
             ON letters(letter_date)
         """)
+
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS deleted_letters (
+                archive_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                original_id INTEGER NOT NULL,
+                sequence_number INTEGER NOT NULL,
+                counter_scope TEXT NOT NULL,
+                classification_code TEXT NOT NULL,
+                classification_name TEXT NOT NULL,
+                letter_number TEXT NOT NULL,
+                letter_date TEXT NOT NULL,
+                subject TEXT NOT NULL,
+                letter_type TEXT NOT NULL,
+                destination TEXT,
+                created_by INTEGER NOT NULL,
+                created_by_name TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                original_status TEXT NOT NULL,
+                deleted_by INTEGER NOT NULL,
+                deleted_by_name TEXT NOT NULL,
+                deleted_at TEXT NOT NULL,
+                delete_reason TEXT NOT NULL
+            )
+        """)
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_deleted_letters_deleted_at
+            ON deleted_letters(deleted_at DESC)
+        """)
+
         conn.execute("""
             CREATE TABLE IF NOT EXISTS audit_log (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -433,6 +462,206 @@ def get_letter_by_id(letter_id: int) -> Optional[sqlite3.Row]:
             "SELECT * FROM letters WHERE id = ?",
             (letter_id,),
         ).fetchone()
+
+
+
+def find_letters_for_deletion(
+    term: str = "",
+    limit: int = 10,
+) -> list[sqlite3.Row]:
+    term = term.strip()
+
+    with db_connect() as conn:
+        if not term:
+            return conn.execute("""
+                SELECT * FROM letters
+                ORDER BY id DESC
+                LIMIT ?
+            """, (limit,)).fetchall()
+
+        if term.isdigit():
+            return conn.execute("""
+                SELECT * FROM letters
+                WHERE sequence_number = ?
+                   OR letter_number LIKE ?
+                ORDER BY id DESC
+                LIMIT ?
+            """, (
+                int(term),
+                f"%/{int(term)}/{LETTER_UNIT_CODE}/%",
+                limit,
+            )).fetchall()
+
+        pattern = f"%{term}%"
+        return conn.execute("""
+            SELECT * FROM letters
+            WHERE letter_number LIKE ?
+               OR subject LIKE ?
+               OR destination LIKE ?
+               OR letter_type LIKE ?
+               OR classification_code LIKE ?
+            ORDER BY id DESC
+            LIMIT ?
+        """, (
+            pattern,
+            pattern,
+            pattern,
+            pattern,
+            pattern,
+            limit,
+        )).fetchall()
+
+
+def get_deleted_letters(limit: int = 10) -> list[sqlite3.Row]:
+    with db_connect() as conn:
+        return conn.execute("""
+            SELECT * FROM deleted_letters
+            ORDER BY archive_id DESC
+            LIMIT ?
+        """, (limit,)).fetchall()
+
+
+def delete_letter_record(
+    letter_id: int,
+    admin_id: int,
+    admin_name: str,
+    reason: str = "Kesalahan input",
+) -> dict:
+    """
+    Menghapus nomor dari register aktif, tetapi menyalin data lengkap ke
+    deleted_letters dan audit_log.
+
+    Jika nomor yang dihapus adalah nomor urut terakhir pada counter terkait,
+    counter dikembalikan ke nomor aktif tertinggi agar nomor terakhir dapat
+    diterbitkan ulang. Menghapus nomor lama tidak mengubah nomor berikutnya.
+    """
+    conn = db_connect()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+
+        row = conn.execute(
+            "SELECT * FROM letters WHERE id = ?",
+            (letter_id,),
+        ).fetchone()
+
+        if row is None:
+            raise ValueError("Nomor surat tidak ditemukan atau sudah dihapus.")
+
+        deleted_at = now_iso()
+
+        conn.execute("""
+            INSERT INTO deleted_letters (
+                original_id,
+                sequence_number,
+                counter_scope,
+                classification_code,
+                classification_name,
+                letter_number,
+                letter_date,
+                subject,
+                letter_type,
+                destination,
+                created_by,
+                created_by_name,
+                created_at,
+                original_status,
+                deleted_by,
+                deleted_by_name,
+                deleted_at,
+                delete_reason
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            row["id"],
+            row["sequence_number"],
+            row["counter_scope"],
+            row["classification_code"],
+            row["classification_name"],
+            row["letter_number"],
+            row["letter_date"],
+            row["subject"],
+            row["letter_type"],
+            row["destination"],
+            row["created_by"],
+            row["created_by_name"],
+            row["created_at"],
+            row["status"],
+            admin_id,
+            admin_name,
+            deleted_at,
+            reason,
+        ))
+
+        conn.execute(
+            "DELETE FROM letters WHERE id = ?",
+            (letter_id,),
+        )
+
+        counter_rolled_back = False
+        next_sequence = None
+
+        counter_row = conn.execute(
+            "SELECT current_number FROM counters WHERE scope = ?",
+            (row["counter_scope"],),
+        ).fetchone()
+
+        if (
+            counter_row is not None
+            and int(counter_row["current_number"]) == int(row["sequence_number"])
+        ):
+            max_row = conn.execute("""
+                SELECT COALESCE(MAX(sequence_number), ?) AS max_seq
+                FROM letters
+                WHERE counter_scope = ?
+            """, (
+                START_NUMBER - 1,
+                row["counter_scope"],
+            )).fetchone()
+
+            new_current = max(
+                int(max_row["max_seq"]),
+                START_NUMBER - 1,
+            )
+
+            conn.execute(
+                "UPDATE counters SET current_number = ? WHERE scope = ?",
+                (new_current, row["counter_scope"]),
+            )
+            counter_rolled_back = True
+            next_sequence = new_current + 1
+
+        conn.execute("""
+            INSERT INTO audit_log(action, detail, user_id, user_name, created_at)
+            VALUES (?, ?, ?, ?, ?)
+        """, (
+            "DELETE_NUMBER",
+            (
+                f"{row['letter_number']} | {row['letter_type']} | "
+                f"perihal={row['subject']} | reason={reason} | "
+                f"counter_rolled_back={counter_rolled_back}"
+            ),
+            admin_id,
+            admin_name,
+            deleted_at,
+        ))
+
+        conn.commit()
+
+        return {
+            "letter_number": row["letter_number"],
+            "sequence_number": int(row["sequence_number"]),
+            "letter_date": row["letter_date"],
+            "letter_type": row["letter_type"],
+            "subject": row["subject"],
+            "destination": row["destination"] or "-",
+            "created_by_name": row["created_by_name"],
+            "counter_rolled_back": counter_rolled_back,
+            "next_sequence": next_sequence,
+        }
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
 
 def get_last_letters(limit: int = 10) -> list[sqlite3.Row]:
@@ -895,6 +1124,7 @@ def main_menu() -> InlineKeyboardMarkup:
         ],
         [InlineKeyboardButton("📊 Laporan Bulanan", callback_data="menu:report")],
         [InlineKeyboardButton("🗂 Daftar Klasifikasi", callback_data="menu:classes")],
+        [InlineKeyboardButton("🗑 Hapus Nomor (Admin)", callback_data="menu:delete")],
         [InlineKeyboardButton("🆔 ID Telegram Saya", callback_data="menu:myid")],
     ])
 
@@ -1007,6 +1237,37 @@ def nota_confirm_keyboard() -> InlineKeyboardMarkup:
     ])
 
 
+
+def delete_list_keyboard(rows: list[sqlite3.Row]) -> InlineKeyboardMarkup:
+    buttons = []
+    for row in rows:
+        label = f"🗑 {row['letter_number']}"
+        buttons.append([
+            InlineKeyboardButton(
+                short_label(label, 58),
+                callback_data=f"delnum:select:{row['id']}",
+            )
+        ])
+
+    buttons.append([
+        InlineKeyboardButton("⬅️ Kembali", callback_data="menu:home")
+    ])
+    return InlineKeyboardMarkup(buttons)
+
+
+def delete_confirm_keyboard(letter_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(
+            "🗑 YA, HAPUS NOMOR",
+            callback_data=f"delnum:confirm:{letter_id}",
+        )],
+        [InlineKeyboardButton(
+            "❌ Batalkan",
+            callback_data="delnum:cancel",
+        )],
+    ])
+
+
 def reset_number_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton(
@@ -1081,7 +1342,10 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "• /batal — batalkan proses input\n\n"
         "<b>Admin:</b>\n"
         "• /setnomor 123 — set nomor berikutnya menjadi 123\n"
-        "• /resetnomor — hapus data uji dan mulai lagi dari nomor awal\n"
+        "• /hapusnomor — pilih nomor aktif yang akan dihapus\n"
+        "• /hapusnomor 123 — cari lalu hapus nomor urut 123\n"
+        "• /riwayathapus — lihat arsip nomor yang pernah dihapus\n"
+        "• /resetnomor — hapus seluruh data uji dan mulai dari awal\n"
         "• /export — ekspor seluruh register ke CSV"
     )
     await update.effective_message.reply_text(text, parse_mode=ParseMode.HTML)
@@ -1137,6 +1401,18 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> O
             parse_mode=ParseMode.HTML,
             reply_markup=report_month_keyboard(),
         )
+        return ConversationHandler.END
+
+    if data == "menu:delete":
+        if not is_admin(update):
+            await query.answer(
+                "Menu ini hanya dapat digunakan admin.",
+                show_alert=True,
+            )
+            return ConversationHandler.END
+
+        rows = await asyncio.to_thread(find_letters_for_deletion, "", 10)
+        await send_delete_list(query.edit_message_text, rows)
         return ConversationHandler.END
 
     if data == "menu:classes":
@@ -1755,6 +2031,57 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     return ConversationHandler.END
 
 
+
+def build_delete_list_text(rows: list[sqlite3.Row], term: str = "") -> str:
+    if not rows:
+        if term:
+            return (
+                "🔎 Tidak ditemukan nomor yang cocok dengan "
+                f"<b>{esc(term)}</b>."
+            )
+        return "📭 Belum ada nomor surat aktif yang dapat dihapus."
+
+    heading = "🗑 <b>HAPUS NOMOR SURAT — KHUSUS ADMIN</b>"
+    if term:
+        heading += f"\nHasil pencarian: <b>{esc(term)}</b>"
+
+    parts = [
+        heading,
+        "",
+        "Pilih nomor yang salah untuk melihat detail dan konfirmasi.",
+    ]
+
+    for index, row in enumerate(rows, start=1):
+        parts.append(
+            f"\n<b>{index}.</b> <code>{esc(row['letter_number'])}</code>\n"
+            f"📅 {esc(format_date_id(row['letter_date']))} • "
+            f"{esc(row['letter_type'])}\n"
+            f"📝 {esc(row['subject'])}\n"
+            f"👤 Diinput oleh {esc(row['created_by_name'])}"
+        )
+
+    return "\n".join(parts)
+
+
+async def send_delete_list(
+    send_func,
+    rows: list[sqlite3.Row],
+    term: str = "",
+) -> None:
+    markup = (
+        delete_list_keyboard(rows)
+        if rows
+        else InlineKeyboardMarkup([
+            [InlineKeyboardButton("⬅️ Kembali", callback_data="menu:home")]
+        ])
+    )
+    await send_func(
+        build_delete_list_text(rows, term),
+        parse_mode=ParseMode.HTML,
+        reply_markup=markup,
+    )
+
+
 def format_letter_row(row: sqlite3.Row) -> str:
     created = row["created_at"]
     try:
@@ -1943,6 +2270,186 @@ async def report_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     )
 
 
+
+async def delete_number_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    if not await access_allowed(update):
+        return
+    if not is_admin(update):
+        await update.effective_message.reply_text(
+            "⛔ Perintah ini hanya untuk admin."
+        )
+        return
+
+    term = " ".join(context.args).strip()
+    rows = await asyncio.to_thread(
+        find_letters_for_deletion,
+        term,
+        10,
+    )
+
+    await send_delete_list(
+        update.effective_message.reply_text,
+        rows,
+        term,
+    )
+
+
+async def delete_number_callback(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    if not await access_allowed(update):
+        return
+
+    query = update.callback_query
+    await query.answer()
+
+    if not is_admin(update):
+        await query.answer(
+            "Tindakan ini hanya dapat dilakukan admin.",
+            show_alert=True,
+        )
+        return
+
+    data = query.data
+
+    if data == "delnum:cancel":
+        await query.edit_message_text(
+            "✅ Penghapusan dibatalkan. Nomor tidak berubah.",
+            reply_markup=main_menu(),
+        )
+        return
+
+    parts = data.split(":")
+    if len(parts) != 3 or not parts[2].isdigit():
+        await query.edit_message_text(
+            "⚠️ Data nomor tidak valid.",
+            reply_markup=main_menu(),
+        )
+        return
+
+    action = parts[1]
+    letter_id = int(parts[2])
+
+    if action == "select":
+        row = await asyncio.to_thread(get_letter_by_id, letter_id)
+        if row is None:
+            await query.edit_message_text(
+                "⚠️ Nomor tidak ditemukan atau sudah dihapus.",
+                reply_markup=main_menu(),
+            )
+            return
+
+        text = (
+            "⚠️ <b>KONFIRMASI HAPUS NOMOR</b>\n\n"
+            f"📌 <b>Nomor:</b>\n<code>{esc(row['letter_number'])}</code>\n\n"
+            f"📅 <b>Tanggal:</b> {esc(format_date_id(row['letter_date']))}\n"
+            f"📂 <b>Jenis:</b> {esc(row['letter_type'])}\n"
+            f"📝 <b>Perihal:</b> {esc(row['subject'])}\n"
+            f"🎯 <b>Tujuan:</b> {esc(row['destination'] or '-')}\n"
+            f"👤 <b>Diinput oleh:</b> {esc(row['created_by_name'])}\n\n"
+            "Data akan dihapus dari register aktif, tetapi salinannya tetap "
+            "disimpan di arsip penghapusan untuk audit.\n\n"
+            "Jika nomor ini merupakan nomor urut terakhir, counter akan "
+            "mundur sehingga nomor tersebut dapat diterbitkan ulang. "
+            "Nomor lama tidak akan menyebabkan nomor berikutnya ikut berubah."
+        )
+
+        await query.edit_message_text(
+            text,
+            parse_mode=ParseMode.HTML,
+            reply_markup=delete_confirm_keyboard(letter_id),
+        )
+        return
+
+    if action != "confirm":
+        await query.edit_message_text(
+            "⚠️ Aksi tidak dikenali.",
+            reply_markup=main_menu(),
+        )
+        return
+
+    user = update.effective_user
+
+    try:
+        result = await asyncio.to_thread(
+            delete_letter_record,
+            letter_id,
+            user.id,
+            user_display_name(update),
+            "Kesalahan input pengguna",
+        )
+    except Exception as exc:
+        logger.exception("Failed to delete issued number")
+        await query.edit_message_text(
+            f"⚠️ Gagal menghapus nomor: {esc(str(exc))}",
+            parse_mode=ParseMode.HTML,
+            reply_markup=main_menu(),
+        )
+        return
+
+    counter_note = (
+        f"\n\n🔄 Karena ini nomor terakhir, nomor urut berikutnya kembali "
+        f"menjadi <code>{result['next_sequence']}</code>."
+        if result["counter_rolled_back"]
+        else (
+            "\n\nℹ️ Nomor yang dihapus bukan nomor terakhir, sehingga nomor "
+            "urut berikutnya tetap berjalan dan nomor lain tidak berubah."
+        )
+    )
+
+    await query.edit_message_text(
+        "✅ <b>NOMOR BERHASIL DIHAPUS</b>\n\n"
+        f"📌 <code>{esc(result['letter_number'])}</code>\n"
+        f"📂 {esc(result['letter_type'])}\n"
+        f"📝 {esc(result['subject'])}\n\n"
+        "Nomor sudah tidak muncul di register aktif dan laporan bulanan."
+        + counter_note
+        + "\n\nSalinan data tetap tersimpan di arsip penghapusan admin.",
+        parse_mode=ParseMode.HTML,
+        reply_markup=main_menu(),
+    )
+
+
+async def deleted_history_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    if not await access_allowed(update):
+        return
+    if not is_admin(update):
+        await update.effective_message.reply_text(
+            "⛔ Perintah ini hanya untuk admin."
+        )
+        return
+
+    rows = await asyncio.to_thread(get_deleted_letters, 10)
+    if not rows:
+        await update.effective_message.reply_text(
+            "📭 Belum ada riwayat nomor yang dihapus."
+        )
+        return
+
+    parts = ["🗃 <b>10 RIWAYAT PENGHAPUSAN TERAKHIR</b>"]
+    for index, row in enumerate(rows, start=1):
+        parts.append(
+            f"\n<b>{index}.</b> <code>{esc(row['letter_number'])}</code>\n"
+            f"📅 Surat: {esc(format_date_id(row['letter_date']))}\n"
+            f"📂 {esc(row['letter_type'])}\n"
+            f"📝 {esc(row['subject'])}\n"
+            f"🗑 Dihapus oleh {esc(row['deleted_by_name'])}\n"
+            f"🕒 {esc(row['deleted_at'])}"
+        )
+
+    await update.effective_message.reply_text(
+        "\n".join(parts),
+        parse_mode=ParseMode.HTML,
+    )
+
+
 async def set_number_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await access_allowed(update):
         return
@@ -2088,6 +2595,8 @@ async def post_init(application: Application) -> None:
         BotCommand("cari", "Cari register surat"),
         BotCommand("laporan", "Download laporan bulanan Excel"),
         BotCommand("klasifikasi", "Lihat daftar klasifikasi"),
+        BotCommand("hapusnomor", "Admin: hapus nomor yang salah"),
+        BotCommand("riwayathapus", "Admin: riwayat nomor dihapus"),
         BotCommand("resetnomor", "Admin: reset data uji dan nomor awal"),
         BotCommand("id", "Lihat Telegram ID"),
         BotCommand("help", "Panduan penggunaan"),
@@ -2169,6 +2678,8 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("laporan", report_command))
     app.add_handler(CommandHandler("klasifikasi", classes_command))
     app.add_handler(CommandHandler("setnomor", set_number_command))
+    app.add_handler(CommandHandler("hapusnomor", delete_number_command))
+    app.add_handler(CommandHandler("riwayathapus", deleted_history_command))
     app.add_handler(CommandHandler("resetnomor", reset_number_command))
     app.add_handler(CommandHandler("export", export_command))
     app.add_handler(CommandHandler("batal", cancel))
@@ -2181,6 +2692,7 @@ def build_application() -> Application:
     app.add_handler(CallbackQueryHandler(category_callback, pattern=r"^cat:"))
     app.add_handler(CallbackQueryHandler(report_callback, pattern=r"^report:"))
     app.add_handler(CallbackQueryHandler(reset_number_callback, pattern=r"^reset:"))
+    app.add_handler(CallbackQueryHandler(delete_number_callback, pattern=r"^delnum:"))
 
     # Unknown commands
     app.add_handler(MessageHandler(filters.COMMAND, unknown_command))
