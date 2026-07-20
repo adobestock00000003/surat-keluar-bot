@@ -112,6 +112,12 @@ CLASSIFICATIONS = {
     "500.13.6.4": "Kompetensi Kepariwisataan dan Ekonomi Kreatif",
 }
 
+LETTER_TYPES = {
+    "npknd": "NPKND",
+    "nota_dinas": "Nota Dinas",
+    "surat_keluar": "Surat Keluar",
+}
+
 CATEGORY_CODES = [
     "000.1.2.3",
     "000.3.2",
@@ -125,7 +131,7 @@ CATEGORY_CODES = [
 ]
 
 # Conversation states
-WAIT_LETTER_DATE, WAIT_SUBJECT, WAIT_DESTINATION, CONFIRM, WAIT_NOTA_RECIPIENTS, WAIT_NOTA_TOPIC, WAIT_NOTA_NOTE, WAIT_NOTA_ATTACHMENT, CONFIRM_NOTA = range(9)
+WAIT_LETTER_DATE, WAIT_SUBJECT, WAIT_LETTER_TYPE, WAIT_DESTINATION, CONFIRM, WAIT_NOTA_RECIPIENTS, WAIT_NOTA_TOPIC, WAIT_NOTA_NOTE, WAIT_NOTA_ATTACHMENT, CONFIRM_NOTA = range(10)
 
 logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
@@ -240,6 +246,7 @@ def init_db() -> None:
                 letter_number TEXT NOT NULL UNIQUE,
                 letter_date TEXT NOT NULL,
                 subject TEXT NOT NULL,
+                letter_type TEXT NOT NULL DEFAULT 'Surat Keluar',
                 destination TEXT,
                 created_by INTEGER NOT NULL,
                 created_by_name TEXT NOT NULL,
@@ -255,6 +262,18 @@ def init_db() -> None:
                 UPDATE letters
                 SET letter_date = substr(created_at, 1, 10)
                 WHERE letter_date IS NULL OR letter_date = ''
+            """)
+
+        # Migrasi otomatis database versi lama yang belum punya kolom jenis surat.
+        if not column_exists(conn, "letters", "letter_type"):
+            conn.execute(
+                "ALTER TABLE letters ADD COLUMN letter_type TEXT "
+                "NOT NULL DEFAULT 'Surat Keluar'"
+            )
+            conn.execute("""
+                UPDATE letters
+                SET letter_type = 'Surat Keluar'
+                WHERE letter_type IS NULL OR letter_type = ''
             """)
 
         conn.execute("""
@@ -315,6 +334,7 @@ def allocate_letter_number(
     classification_code: str,
     letter_date: str,
     subject: str,
+    letter_type: str,
     destination: str,
     user_id: int,
     user_name: str,
@@ -365,11 +385,12 @@ def allocate_letter_number(
                 letter_number,
                 letter_date,
                 subject,
+                letter_type,
                 destination,
                 created_by,
                 created_by_name,
                 created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             next_number,
             scope,
@@ -378,6 +399,7 @@ def allocate_letter_number(
             letter_number,
             letter_date,
             subject,
+            letter_type,
             destination,
             user_id,
             user_name,
@@ -390,7 +412,7 @@ def allocate_letter_number(
             VALUES (?, ?, ?, ?, ?)
         """, (
             "CREATE_NUMBER",
-            f"{letter_number} | tanggal surat {letter_date}",
+            f"{letter_number} | {letter_type} | tanggal surat {letter_date}",
             user_id,
             user_name,
             now_iso(),
@@ -439,12 +461,14 @@ def search_letters(term: str, limit: int = 15) -> list[sqlite3.Row]:
             WHERE letter_number LIKE ?
                OR letter_date LIKE ?
                OR subject LIKE ?
+               OR letter_type LIKE ?
                OR destination LIKE ?
                OR classification_code LIKE ?
                OR classification_name LIKE ?
             ORDER BY id DESC
             LIMIT ?
         """, (
+            pattern,
             pattern,
             pattern,
             pattern,
@@ -554,6 +578,7 @@ def export_csv_file() -> str:
                 letter_number,
                 classification_code,
                 classification_name,
+                letter_type,
                 subject,
                 destination,
                 created_by_name,
@@ -571,6 +596,7 @@ def export_csv_file() -> str:
             "Nomor Surat",
             "Kode Klasifikasi",
             "Nama Klasifikasi",
+            "Jenis Surat",
             "Perihal",
             "Tujuan",
             "Dibuat Oleh",
@@ -584,6 +610,7 @@ def export_csv_file() -> str:
                 row["letter_number"],
                 row["classification_code"],
                 row["classification_name"],
+                row["letter_type"],
                 row["subject"],
                 row["destination"] or "",
                 row["created_by_name"],
@@ -616,19 +643,19 @@ def build_monthly_xlsx(month_key: str) -> tuple[str, int]:
     border = Border(left=thin, right=thin, top=thin, bottom=thin)
 
     # Judul.
-    ws.merge_cells("A1:J1")
+    ws.merge_cells("A1:K1")
     ws["A1"] = "LAPORAN BULANAN SURAT KELUAR BIDANG"
     ws["A1"].font = Font(size=16, bold=True, color=dark)
     ws["A1"].alignment = Alignment(horizontal="center", vertical="center")
     ws["A1"].fill = PatternFill("solid", fgColor=yellow)
     ws.row_dimensions[1].height = 28
 
-    ws.merge_cells("A2:J2")
+    ws.merge_cells("A2:K2")
     ws["A2"] = f"Periode: {month_label(month_key)}"
     ws["A2"].font = Font(size=11, bold=True, color=dark)
     ws["A2"].alignment = Alignment(horizontal="center")
 
-    ws.merge_cells("A3:J3")
+    ws.merge_cells("A3:K3")
     ws["A3"] = f"Jumlah surat: {len(rows)} | Dibuat: {local_now().strftime('%d-%m-%Y %H:%M')} {APP_TIMEZONE}"
     ws["A3"].font = Font(size=10, italic=True, color="4B5563")
     ws["A3"].alignment = Alignment(horizontal="center")
@@ -639,6 +666,7 @@ def build_monthly_xlsx(month_key: str) -> tuple[str, int]:
         "Nomor Surat",
         "Kode Klasifikasi",
         "Klasifikasi",
+        "Jenis Surat",
         "Perihal",
         "Tujuan",
         "Dibuat Oleh",
@@ -672,6 +700,7 @@ def build_monthly_xlsx(month_key: str) -> tuple[str, int]:
             row["letter_number"],
             row["classification_code"],
             row["classification_name"],
+            row["letter_type"],
             row["subject"],
             row["destination"] or "-",
             row["created_by_name"],
@@ -684,19 +713,19 @@ def build_monthly_xlsx(month_key: str) -> tuple[str, int]:
             cell.border = border
             cell.alignment = Alignment(
                 vertical="top",
-                horizontal="center" if col_idx in {1, 2, 3, 4, 10} else "left",
+                horizontal="center" if col_idx in {1, 2, 3, 4, 6, 11} else "left",
                 wrap_text=True,
             )
             if index % 2 == 0:
                 cell.fill = PatternFill("solid", fgColor=light_fill)
 
         ws.cell(excel_row, 2).number_format = "dd-mm-yyyy"
-        ws.cell(excel_row, 9).number_format = "dd-mm-yyyy hh:mm"
+        ws.cell(excel_row, 10).number_format = "dd-mm-yyyy hh:mm"
 
     last_row = max(header_row + len(rows), header_row)
 
     if rows:
-        table = Table(displayName="RegisterSuratBulanan", ref=f"A{header_row}:J{last_row}")
+        table = Table(displayName="RegisterSuratBulanan", ref=f"A{header_row}:K{last_row}")
         style = TableStyleInfo(
             name="TableStyleMedium2",
             showFirstColumn=False,
@@ -708,20 +737,21 @@ def build_monthly_xlsx(month_key: str) -> tuple[str, int]:
         ws.add_table(table)
 
     ws.freeze_panes = "A6"
-    ws.auto_filter.ref = f"A{header_row}:J{last_row}"
+    ws.auto_filter.ref = f"A{header_row}:K{last_row}"
     ws.sheet_view.showGridLines = False
 
     widths = {
         "A": 6,
         "B": 15,
-        "C": 24,
+        "C": 28,
         "D": 18,
-        "E": 42,
-        "F": 42,
-        "G": 30,
-        "H": 24,
-        "I": 20,
-        "J": 12,
+        "E": 38,
+        "F": 18,
+        "G": 38,
+        "H": 30,
+        "I": 24,
+        "J": 20,
+        "K": 12,
     }
     for col, width in widths.items():
         ws.column_dimensions[col].width = width
@@ -921,6 +951,15 @@ def date_keyboard() -> InlineKeyboardMarkup:
     ])
 
 
+def letter_type_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📑 NPKND", callback_data="lettertype:npknd")],
+        [InlineKeyboardButton("📝 Nota Dinas", callback_data="lettertype:nota_dinas")],
+        [InlineKeyboardButton("📨 Surat Keluar", callback_data="lettertype:surat_keluar")],
+        [InlineKeyboardButton("❌ Batalkan", callback_data="confirm:no")],
+    ])
+
+
 def confirm_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [
@@ -933,7 +972,7 @@ def confirm_keyboard() -> InlineKeyboardMarkup:
 def nota_offer_keyboard(letter_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton(
-            "📄 Buat Nota Konsep Surat",
+            "📄 Buat NPKND",
             callback_data=f"nota:start:{letter_id}",
         )],
         [InlineKeyboardButton("🏠 Menu Utama", callback_data="menu:home")],
@@ -1038,7 +1077,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "• /laporan — laporan spreadsheet bulan berjalan\n"
         "• /laporan 2026-07 — laporan spreadsheet bulan tertentu\n"
         "• /id — lihat Telegram ID\n"
-        "• Setelah nomor terbit, tekan Buat Nota Konsep Surat\n"
+        "• Setelah nomor terbit, tekan Buat NPKND\n"
         "• /batal — batalkan proses input\n\n"
         "<b>Admin:</b>\n"
         "• /setnomor 123 — set nomor berikutnya menjadi 123\n"
@@ -1245,6 +1284,33 @@ async def receive_subject(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     context.user_data["subject"] = subject
 
     await update.effective_message.reply_text(
+        "📂 <b>Pilih jenis surat:</b>",
+        parse_mode=ParseMode.HTML,
+        reply_markup=letter_type_keyboard(),
+    )
+    return WAIT_LETTER_TYPE
+
+
+async def select_letter_type(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> int:
+    if not await access_allowed(update):
+        return ConversationHandler.END
+
+    query = update.callback_query
+    await query.answer()
+
+    key = query.data.split(":", 1)[1]
+    letter_type = LETTER_TYPES.get(key)
+    if not letter_type:
+        await query.answer("Jenis surat tidak valid.", show_alert=True)
+        return WAIT_LETTER_TYPE
+
+    context.user_data["letter_type"] = letter_type
+
+    await query.edit_message_text(
+        f"✅ <b>Jenis surat:</b> {esc(letter_type)}\n\n"
         "🎯 Ketik <b>tujuan/penerima surat</b>.\n"
         "Atau tekan <b>Lewati</b> jika tidak ingin dicatat.",
         parse_mode=ParseMode.HTML,
@@ -1281,6 +1347,7 @@ async def show_confirmation(send_func, context: ContextTypes.DEFAULT_TYPE) -> No
     name = context.user_data["classification_name"]
     letter_date = context.user_data["letter_date"]
     subject = context.user_data["subject"]
+    letter_type = context.user_data["letter_type"]
     destination = context.user_data.get("destination", "-")
 
     text = (
@@ -1288,6 +1355,7 @@ async def show_confirmation(send_func, context: ContextTypes.DEFAULT_TYPE) -> No
         f"<b>Tanggal surat:</b> {esc(format_date_id(letter_date))}\n\n"
         f"<b>Klasifikasi:</b>\n<code>{esc(code)}</code>\n{esc(name)}\n\n"
         f"<b>Perihal:</b>\n{esc(subject)}\n\n"
+        f"<b>Jenis Surat:</b>\n{esc(letter_type)}\n\n"
         f"<b>Tujuan:</b>\n{esc(destination)}\n\n"
         "Nomor urut tanpa nol di depan akan diterbitkan dengan format <code>klasifikasi/nomor/118.4/tahun</code>."
     )
@@ -1319,6 +1387,7 @@ async def confirm_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         "classification_name",
         "letter_date",
         "subject",
+        "letter_type",
     }
     if not required.issubset(context.user_data):
         context.user_data.clear()
@@ -1331,6 +1400,7 @@ async def confirm_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     code = context.user_data["classification_code"]
     letter_date = context.user_data["letter_date"]
     subject = context.user_data["subject"]
+    letter_type = context.user_data["letter_type"]
     destination = context.user_data.get("destination", "-")
     user = update.effective_user
 
@@ -1340,6 +1410,7 @@ async def confirm_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             code,
             letter_date,
             subject,
+            letter_type,
             destination,
             user.id,
             user_display_name(update),
@@ -1370,6 +1441,8 @@ async def confirm_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         f"{esc(CLASSIFICATIONS[code])}\n\n"
         f"📝 <b>Perihal:</b>\n"
         f"{esc(subject)}\n\n"
+        f"📂 <b>Jenis Surat:</b>\n"
+        f"{esc(letter_type)}\n\n"
         f"🎯 <b>Tujuan:</b>\n"
         f"{esc(destination)}\n\n"
         f"👤 <b>Dibuat oleh:</b> {esc(user_display_name(update))}\n"
@@ -1414,7 +1487,7 @@ async def start_nota_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     has_existing = (row["destination"] or "-").strip() != "-"
     await query.edit_message_text(
-        "📄 <b>PEMBUATAN NOTA KONSEP SURAT</b>\n\n"
+        "📄 <b>PEMBUATAN NPKND</b>\n\n"
         f"Nomor: <code>{esc(row['letter_number'])}</code>\n"
         f"Tanggal: <b>{esc(format_date_id(row['letter_date']))}</b>\n\n"
         "Ketik daftar <b>Kepada</b>, satu penerima per baris.\n\n"
@@ -1549,7 +1622,7 @@ async def select_nota_attachment(update: Update, context: ContextTypes.DEFAULT_T
     ) if len(recipients) <= 2 else "Terlampir"
 
     await query.edit_message_text(
-        "🔎 <b>KONFIRMASI NOTA KONSEP</b>\n\n"
+        "🔎 <b>KONFIRMASI NPKND</b>\n\n"
         f"<b>Tanggal:</b> {esc(format_date_id(context.user_data['nota_letter_date']))}\n"
         f"<b>Nomor:</b> <code>{esc(context.user_data['nota_letter_number'])}</code>\n\n"
         f"<b>Kepada:</b>\n{esc(recipients_text)}\n\n"
@@ -1587,7 +1660,7 @@ async def generate_nota_callback(update: Update, context: ContextTypes.DEFAULT_T
         return ConversationHandler.END
 
     query = update.callback_query
-    await query.answer("Membuat nota konsep...")
+    await query.answer("Membuat NPKND...")
 
     required = {
         "nota_letter_id",
@@ -1600,14 +1673,14 @@ async def generate_nota_callback(update: Update, context: ContextTypes.DEFAULT_T
     }
     if not required.issubset(context.user_data):
         await query.edit_message_text(
-            "⚠️ Data nota tidak lengkap. Silakan mulai lagi dari nomor surat.",
+            "⚠️ Data NPKND tidak lengkap. Silakan mulai lagi dari nomor surat.",
             reply_markup=main_menu(),
         )
         context.user_data.clear()
         return ConversationHandler.END
 
     await query.edit_message_text(
-        "⏳ Sedang membuat Nota Konsep Surat dalam format PDF dan Word..."
+        "⏳ Sedang membuat NPKND dalam format PDF dan Word..."
     )
 
     temp_dir = tempfile.mkdtemp(prefix="nota_konsep_bot_")
@@ -1628,7 +1701,7 @@ async def generate_nota_callback(update: Update, context: ContextTypes.DEFAULT_T
                 document=pdf_file,
                 filename=Path(pdf_path).name,
                 caption=(
-                    "📄 <b>Nota Konsep Surat - PDF</b>\n"
+                    "📄 <b>NPKND - PDF</b>\n"
                     f"Nomor: <code>{esc(context.user_data['nota_letter_number'])}</code>"
                 ),
                 parse_mode=ParseMode.HTML,
@@ -1642,13 +1715,13 @@ async def generate_nota_callback(update: Update, context: ContextTypes.DEFAULT_T
             )
 
         await query.message.reply_text(
-            "✅ Nota konsep berhasil dibuat. Format utama menggunakan ukuran teks 11 dengan tata letak mengikuti contoh.",
+            "✅ NPKND berhasil dibuat. Format utama menggunakan font Arial ukuran 11 dengan tata letak mengikuti contoh.",
             reply_markup=main_menu(),
         )
     except Exception as exc:
         logger.exception("Failed to generate nota konsep")
         await query.message.reply_text(
-            f"⚠️ Nota konsep gagal dibuat: {esc(str(exc))}",
+            f"⚠️ NPKND gagal dibuat: {esc(str(exc))}",
             parse_mode=ParseMode.HTML,
             reply_markup=nota_offer_keyboard(context.user_data["nota_letter_id"]),
         )
@@ -1667,7 +1740,7 @@ async def cancel_nota_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     await query.answer()
     context.user_data.clear()
     await query.edit_message_text(
-        "❌ Pembuatan nota konsep dibatalkan.",
+        "❌ Pembuatan NPKND dibatalkan.",
         reply_markup=main_menu(),
     )
     return ConversationHandler.END
@@ -1693,6 +1766,7 @@ def format_letter_row(row: sqlite3.Row) -> str:
     return (
         f"📌 <code>{esc(row['letter_number'])}</code>\n"
         f"📅 {esc(format_date_id(row['letter_date']))}\n"
+        f"📂 {esc(row['letter_type'])}\n"
         f"📝 {esc(row['subject'])}\n"
         f"🎯 {esc(row['destination'] or '-')}\n"
         f"👤 {esc(row['created_by_name'])} • {esc(created_text)}"
@@ -2042,6 +2116,10 @@ def build_application() -> Application:
             ],
             WAIT_SUBJECT: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, receive_subject),
+            ],
+            WAIT_LETTER_TYPE: [
+                CallbackQueryHandler(select_letter_type, pattern=r"^lettertype:"),
+                CallbackQueryHandler(confirm_callback, pattern=r"^confirm:no$"),
             ],
             WAIT_DESTINATION: [
                 CallbackQueryHandler(skip_destination, pattern=r"^destination:skip$"),

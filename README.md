@@ -1,4 +1,4 @@
-# Bot Telegram Penomoran Surat Keluar Bidang — v7
+# Bot Telegram Penomoran Surat Keluar Bidang — v8
 
 Bot Telegram untuk menerbitkan nomor surat keluar dengan pola:
 
@@ -40,12 +40,12 @@ Contoh nomor:
 
 
 
-## Nota Konsep Surat otomatis
+## NPKND otomatis
 
 Setelah nomor surat berhasil diterbitkan, bot menampilkan tombol:
 
 ```text
-📄 Buat Nota Konsep Surat
+📄 Buat NPKND
 ```
 
 Bot kemudian meminta:
@@ -86,7 +86,30 @@ Ketentuannya:
 - nomor urut dibatasi maksimal tiga digit, yaitu `1` sampai `999`;
 - angka `118.4` ditambahkan otomatis;
 - tahun diambil otomatis dari **tanggal surat keluar**, bukan dari tanggal input bot;
-- nomor lengkap otomatis dipakai pada Nota Konsep Surat, riwayat, pencarian, CSV, dan laporan Excel.
+- nomor lengkap otomatis dipakai pada NPKND, riwayat, pencarian, CSV, dan laporan Excel.
+
+
+## Jenis surat
+
+Setelah pengguna menulis perihal, bot menampilkan tiga pilihan:
+
+- `NPKND`
+- `Nota Dinas`
+- `Surat Keluar`
+
+Jenis surat disimpan ke database dan ikut tampil pada:
+
+- hasil penerbitan nomor;
+- riwayat;
+- pencarian;
+- export CSV;
+- laporan bulanan Excel.
+
+Setelah nomor berhasil diterbitkan, tombol dokumen sekarang bernama:
+
+```text
+Buat NPKND
+```
 
 ## Fitur utama
 
